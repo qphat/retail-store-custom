@@ -2,43 +2,51 @@ services:
   checkout:
     build:
       context: .
-    hostname: checkout
+    depends_on:
+      redis:
+        condition: service_healthy
+        restart: true
     restart: always
     cap_drop:
       - all
-    cap_add:
-      - NET_BIND_SERVICE
-    read_only: true
-    tmpfs:
-      - /tmp:rw,noexec,nosuid
+    security_opt:
+      - no-new-privileges:true
     environment:
       - RETAIL_CHECKOUT_PERSISTENCE_PROVIDER=redis
-      - RETAIL_CHECKOUT_PERSISTENCE_REDIS_URL=redis://checkout-redis:6379
+      - RETAIL_CHECKOUT_PERSISTENCE_REDIS_URL=redis://redis:6379
+      - RETAIL_CHECKOUT_ENDPOINTS_ORDERS=http://orders:8080
     ports:
-      - '8085:8080'
+      - "8084:8080"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 128M
     healthcheck:
-      test: ['CMD-SHELL', 'curl -f http://localhost:8080/health || exit 1']
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health || exit 1"]
       interval: 10s
-      timeout: 10s
+      timeout: 5s
       retries: 3
-    depends_on:
-      checkout-redis:
-        condition: service_healthy
-    develop:
-      watch:
-        - action: rebuild
-          path: src
-        - action: rebuild
-          path: package.json
+      start_period: 20s
 
-  checkout-redis:
-    image: redis:6.0-alpine
-    hostname: checkout-redis
+  redis:
+    image: redis:7-alpine
     restart: always
-    ports:
-      - '6379:6379'
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          cpus: "0.3"
+          memory: 128M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
     healthcheck:
-      test: ['CMD', 'redis-cli', 'ping']
-      interval: 1s
-      timeout: 3s
-      retries: 30
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3

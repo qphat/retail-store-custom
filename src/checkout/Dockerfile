@@ -1,40 +1,32 @@
-FROM node:20-alpine AS build
-WORKDIR /usr/src/app
-COPY --chown=node:node package*.json ./
-COPY --chown=node:node . .
-RUN yarn install --frozen-lockfile
-RUN yarn build
-USER node
-
-
-FROM public.ecr.aws/amazonlinux/amazonlinux:2023
-
-# We tell DNF not to install Recommends and Suggests packages, which are
-# weak dependencies in DNF terminology, thus keeping our installed set of
-# packages as minimal as possible.
-RUN dnf --setopt=install_weak_deps=False install -q -y \
-    nodejs20 \
-    shadow-utils \
-    && \
-    dnf clean all
-
-RUN alternatives --install /usr/bin/node node /usr/bin/node-20 90
-
-ENV APPUSER=appuser
-ENV APPUID=1000
-ENV APPGID=1000
-
-RUN useradd \
-    --home "/app" \
-    --create-home \
-    --user-group \
-    --uid "$APPUID" \
-    "$APPUSER"
+# Build Stage
+FROM node:22-alpine AS build-env
 
 WORKDIR /app
-USER appuser
 
-COPY --chown=node:node --from=build /usr/src/app/node_modules ./node_modules
-COPY --chown=node:node --from=build /usr/src/app/dist ./dist
+# Cache dependencies before copying source
+COPY package.json yarn.lock .yarnrc.yml ./
+COPY .yarn/releases .yarn/releases
+RUN yarn install --frozen-lockfile
 
-ENTRYPOINT [ "node", "dist/main.js" ]
+# Build TypeScript to dist/
+COPY . .
+RUN yarn build
+
+# Run Stage
+FROM node:22-alpine
+
+# 'node' user already exists in the official node image
+USER node
+
+WORKDIR /app
+
+# Copy only what's needed to run
+COPY --chown=node:node --from=build-env /app/node_modules ./node_modules
+COPY --chown=node:node --from=build-env /app/dist ./dist
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=10s --timeout=5s --retries=3 --start-period=20s \
+    CMD wget -qO- http://localhost:8080/health || exit 1
+
+ENTRYPOINT ["node", "dist/main"]

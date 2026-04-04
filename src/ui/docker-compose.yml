@@ -1,30 +1,304 @@
 services:
   ui:
-    ports:
-      - 8888:8080
-    environment:
-      - JAVA_OPTS=-XX:MaxRAMPercentage=75.0 -Djava.security.egd=file:/dev/urandom
-      - SERVER_TOMCAT_ACCESSLOG_ENABLED=true
-    hostname: ui
     build:
       context: .
+    depends_on:
+      catalog:
+        condition: service_healthy
+        restart: true
+      cart:
+        condition: service_healthy
+        restart: true
+      checkout:
+        condition: service_healthy
+        restart: true
+      orders:
+        condition: service_healthy
+        restart: true
     restart: always
-    mem_limit: 512m
     cap_drop:
-      - ALL
+      - all
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - RETAIL_UI_ENDPOINTS_CATALOG=http://catalog:8080
+      - RETAIL_UI_ENDPOINTS_CARTS=http://cart:8080
+      - RETAIL_UI_ENDPOINTS_CHECKOUT=http://checkout:8080
+      - RETAIL_UI_ENDPOINTS_ORDERS=http://orders:8080
+    ports:
+      - "8888:8080"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          cpus: "0.1"
+          memory: 256M
     healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "curl -s -f http://localhost:8080/actuator/health || exit 1",
-        ]
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/actuator/health || exit 1"]
       interval: 10s
-      timeout: 10s
+      timeout: 5s
       retries: 3
-      start_period: 15s
-    develop:
-      watch:
-        - action: rebuild
-          path: src
-        - action: rebuild
-          path: pom.xml
+      start_period: 30s
+
+  catalog:
+    build:
+      context: ../catalog
+    restart: always
+    cap_drop:
+      - all
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - GIN_MODE=release
+      - RETAIL_CATALOG_PERSISTENCE_PROVIDER=in-memory
+    deploy:
+      resources:
+        limits:
+          cpus: "0.3"
+          memory: 128M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  cart:
+    build:
+      context: ../cart
+    restart: always
+    cap_drop:
+      - all
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - RETAIL_CART_PERSISTENCE_PROVIDER=in-memory
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          cpus: "0.1"
+          memory: 256M
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/actuator/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  checkout:
+    build:
+      context: ../checkout
+    restart: always
+    cap_drop:
+      - all
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - RETAIL_CHECKOUT_PERSISTENCE_PROVIDER=in-memory
+      - RETAIL_CHECKOUT_ENDPOINTS_ORDERS=http://orders:8080
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 128M
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  orders:
+    build:
+      context: ../orders
+    restart: always
+    cap_drop:
+      - all
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - RETAIL_ORDERS_PERSISTENCE_PROVIDER=in-memory
+      - RETAIL_ORDERS_MESSAGING_PROVIDER=in-memory
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          cpus: "0.1"
+          memory: 256M
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/actuator/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  prometheus:
+    image: prom/prometheus:latest
+    restart: always
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.3"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 128M
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9090/-/healthy || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  grafana:
+    image: grafana/grafana:latest
+    restart: always
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    volumes:
+      # Auto-provision Prometheus as datasource on startup
+      - ./observability/grafana/datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+      # Auto-provision dashboards (dashboards.yml + JSON files all in same directory)
+      - ./observability/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    deploy:
+      resources:
+        limits:
+          cpus: "0.3"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 128M
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  elasticsearch:
+    image: elasticsearch:8.13.0
+    restart: always
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      # Single-node mode — no clustering needed for local dev
+      - discovery.type=single-node
+      # Disable TLS/auth for local dev simplicity
+      - xpack.security.enabled=false
+      - xpack.security.http.ssl.enabled=false
+      # Limit JVM heap to avoid consuming all host memory
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    ports:
+      - "9200:9200"
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  kibana:
+    image: kibana:8.13.0
+    restart: always
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      # Limit Node.js heap to stay within container memory limit
+      - NODE_OPTIONS=--max-old-space-size=1024
+    ports:
+      - "5601:5601"
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1.5G
+        reservations:
+          cpus: "0.2"
+          memory: 1G
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:5601/api/status || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  kibana-setup:
+    image: curlimages/curl:latest
+    restart: on-failure
+    depends_on:
+      kibana:
+        condition: service_healthy
+    command: >
+      curl -s -X POST http://kibana:5601/api/data_views/data_view
+      -H "kbn-xsrf: true"
+      -H "Content-Type: application/json"
+      -d '{
+        "data_view": {
+          "title": ".ds-logs-*",
+          "name": "logs",
+          "timeFieldName": "@timestamp"
+        }
+      }'
+
+  filebeat:
+    image: elastic/filebeat:8.13.0
+    restart: always
+    # Needs root to read /var/lib/docker/containers and docker socket
+    user: root
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    # --strict.perms=false: skip ownership check since config is owned by host user not root
+    command: filebeat -e --strict.perms=false
+    volumes:
+      # Filebeat config
+      - ./observability/filebeat/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      # Docker container log files on the host
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      # Docker socket to read container metadata
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    deploy:
+      resources:
+        limits:
+          cpus: "0.3"
+          memory: 128M
+        reservations:
+          cpus: "0.1"
+          memory: 64M

@@ -1,65 +1,40 @@
 # Build Stage
-FROM public.ecr.aws/amazonlinux/amazonlinux:2023 as build-env
+FROM maven:3.9-eclipse-temurin-21 AS build-env
 
-# We tell DNF not to install Recommends and Suggests packages, keeping our
-# installed set of packages as minimal as possible.
-RUN dnf --setopt=install_weak_deps=False install -q -y \
-    maven \
-    java-21-amazon-corretto-headless \
-    which \
-    tar \
-    gzip \
-    && \
-    dnf clean all
+WORKDIR /app
 
-ARG JAR_PATH
-
-VOLUME /tmp
-WORKDIR /
-
+# Cache dependencies before copying source
 COPY .mvn .mvn
 COPY mvnw .
 COPY pom.xml .
-
 RUN ./mvnw dependency:go-offline -B -q
 
+# Build jar
 COPY ./src ./src
-
 RUN ./mvnw -DskipTests package -q && \
-    mv /target/carts-0.0.1-SNAPSHOT.jar /app.jar
+    mv target/*.jar /app.jar
 
-# Package Stage
-FROM public.ecr.aws/amazonlinux/amazonlinux:2023
+# Run Stage
+FROM eclipse-temurin:21-jre-jammy
 
-# We tell DNF not to install Recommends and Suggests packages, which are
-# weak dependencies in DNF terminology, thus keeping our installed set of
-# packages as minimal as possible.
-RUN dnf --setopt=install_weak_deps=False install -q -y \
-    java-21-amazon-corretto-headless \
-    shadow-utils \
-    && \
-    dnf clean all
+# Install curl for healthcheck
+RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
 
-ENV APPUSER=appuser
-ENV APPUID=1000
-ENV APPGID=1000
+# Create non-root user
+RUN groupadd -g 1000 appgroup && useradd -u 1000 -g appgroup -m appuser
 
-RUN useradd \
-    --home "/app" \
-    --create-home \
-    --user-group \
-    --uid "$APPUID" \
-    "$APPUSER"
-
-ENV JAVA_TOOL_OPTIONS=
 ENV SPRING_PROFILES_ACTIVE=prod
+# JVM tuning: use container-aware memory limits, optimize GC for containers
+ENV JAVA_TOOL_OPTIONS="-XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0 -XX:+UseG1GC -XX:+ExitOnOutOfMemoryError"
 
 WORKDIR /app
 USER appuser
 
-COPY ./ATTRIBUTION.md ./LICENSES.md
-COPY --chown=appuser:appuser --from=build-env /app.jar .
+COPY --chown=appuser:appgroup --from=build-env /app.jar .
 
 EXPOSE 8080
 
-ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar /app/app.jar"]
+HEALTHCHECK --interval=10s --timeout=5s --retries=3 --start-period=30s \
+    CMD curl -f http://localhost:8080/actuator/health || exit 1
+
+ENTRYPOINT ["java", "-jar", "/app/app.jar"]

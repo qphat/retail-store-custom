@@ -1,0 +1,22 @@
+filebeat.inputs:
+  - type: container
+    paths:
+      # Read all container log files from the host
+      - /var/lib/docker/containers/*/*.log
+    processors:
+      # Attach Docker container metadata (name, image, labels) to each log line
+      - add_docker_metadata:
+          host: "unix:///var/run/docker.sock"
+
+processors:
+  # Keep only the fields we care about
+  - drop_fields:
+      fields: ["agent", "ecs", "host", "input"]
+      ignore_missing: true
+
+output.elasticsearch:
+  hosts: ["elasticsearch:9200"]
+  indices:
+    - index: "logs-%{[container.labels.com_docker_compose_service]}-%{+yyyy.MM.dd}"
+
+logging.level: warning

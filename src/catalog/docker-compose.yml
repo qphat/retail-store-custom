@@ -14,10 +14,10 @@ services:
       - no-new-privileges:true
     environment:
       - GIN_MODE=release
-      - reschedule=on-node-failure
       - RETAIL_CATALOG_PERSISTENCE_PROVIDER=mysql
-      - RETAIL_CATALOG_PERSISTENCE_PASSWORD=${DB_PASSWORD}
       - RETAIL_CATALOG_PERSISTENCE_ENDPOINT=catalog-db:3306
+      - RETAIL_CATALOG_PERSISTENCE_USER=catalog_user
+      - RETAIL_CATALOG_PERSISTENCE_PASSWORD=${DB_PASSWORD}
     ports:
       - "8081:8080"
     healthcheck:
@@ -38,7 +38,6 @@ services:
     security_opt:
       - no-new-privileges:true
     environment:
-      - reschedule=on-node-failure
       - MYSQL_ROOT_PASSWORD=${DB_PASSWORD}
       - MYSQL_ALLOW_EMPTY_PASSWORD=true
       - MYSQL_DATABASE=catalogdb
