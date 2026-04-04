@@ -99,7 +99,6 @@ jobs:
           - service: checkout
             runtime: node
             node-version: '22'
-            cache-dep-path: src/checkout/yarn.lock
 
           - service: ui
             runtime: java
@@ -132,8 +131,8 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
-          cache: yarn
-          cache-dependency-path: ${{ matrix.cache-dep-path }}
+          # No cache: Yarn 4 Berry stores cache in a non-standard path that
+          # setup-node doesn't know about — causes post-job cleanup to fail
 
       # ── Docker ──
 
