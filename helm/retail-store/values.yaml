@@ -1,0 +1,84 @@
+# Default values — applied to all services unless overridden per-service
+
+imageRegistry: koomi1
+imageTag: latest
+
+services:
+  catalog:
+    image: retail-app-catalog
+    port: 8080
+    healthPath: /health
+    env:
+      RETAIL_CATALOG_PERSISTENCE_PROVIDER: in-memory
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+
+  cart:
+    image: retail-app-cart
+    port: 8080
+    healthPath: /actuator/health
+    env:
+      RETAIL_CART_PERSISTENCE_PROVIDER: in-memory
+    resources:
+      requests:
+        cpu: 128m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+  orders:
+    image: retail-app-orders
+    port: 8080
+    healthPath: /actuator/health
+    env:
+      RETAIL_ORDERS_PERSISTENCE_PROVIDER: in-memory
+      RETAIL_ORDERS_MESSAGING_PROVIDER: in-memory
+    resources:
+      requests:
+        cpu: 128m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+  checkout:
+    image: retail-app-checkout
+    port: 8080
+    healthPath: /health
+    env:
+      RETAIL_CHECKOUT_PERSISTENCE_PROVIDER: in-memory
+      RETAIL_CHECKOUT_ENDPOINTS_ORDERS: http://orders
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+
+  ui:
+    image: retail-app-ui
+    port: 8080
+    healthPath: /actuator/health
+    env:
+      RETAIL_UI_ENDPOINTS_CATALOG: http://catalog
+      RETAIL_UI_ENDPOINTS_CARTS: http://cart
+      RETAIL_UI_ENDPOINTS_CHECKOUT: http://checkout
+      RETAIL_UI_ENDPOINTS_ORDERS: http://orders
+    resources:
+      requests:
+        cpu: 128m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+ingress:
+  enabled: true
+  host: ""   # empty = match all hosts (localhost)

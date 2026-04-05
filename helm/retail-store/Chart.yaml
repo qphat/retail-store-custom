@@ -1,0 +1,5 @@
+apiVersion: v2
+name: retail-store
+description: AWS Containers Retail Store sample app
+version: 0.1.0
+appVersion: "latest"

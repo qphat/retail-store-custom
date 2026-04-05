@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ui
+  labels:
+    app: ui
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ui
+  template:
+    metadata:
+      labels:
+        app: ui
+    spec:
+      containers:
+        - name: ui
+          image: koomi1/retail-app-ui:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+          env:
+            # Each value is the K8s Service DNS name (service-name:port)
+            - name: RETAIL_UI_ENDPOINTS_CATALOG
+              value: "http://catalog"
+            - name: RETAIL_UI_ENDPOINTS_CARTS
+              value: "http://cart"
+            - name: RETAIL_UI_ENDPOINTS_CHECKOUT
+              value: "http://checkout"
+            - name: RETAIL_UI_ENDPOINTS_ORDERS
+              value: "http://orders"
+          resources:
+            requests:
+              cpu: 128m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 20
