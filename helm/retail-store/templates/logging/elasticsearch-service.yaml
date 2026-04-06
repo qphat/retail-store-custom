@@ -1,0 +1,13 @@
+{{- if .Values.logging.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch
+spec:
+  selector:
+    app: elasticsearch
+  ports:
+    - port: 9200
+      targetPort: 9200
+      name: http
+{{- end }}

@@ -1,0 +1,49 @@
+{{- if .Values.logging.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kibana
+  labels:
+    app: kibana
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kibana
+  template:
+    metadata:
+      labels:
+        app: kibana
+    spec:
+      containers:
+        - name: kibana
+          image: {{ .Values.logging.kibana.image }}
+          ports:
+            - containerPort: 5601
+          env:
+            - name: ELASTICSEARCH_HOSTS
+              value: http://elasticsearch:9200
+            - name: NODE_OPTIONS
+              value: {{ .Values.logging.kibana.nodeOptions | quote }}
+            # Required for serving Kibana under /kibana subpath via ingress
+            - name: SERVER_BASEPATH
+              value: /kibana
+            - name: SERVER_REWRITEBASEPATH
+              value: "true"
+          resources:
+            {{- toYaml .Values.logging.kibana.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /kibana/api/status
+              port: 5601
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            failureThreshold: 10
+          livenessProbe:
+            httpGet:
+              path: /kibana/api/status
+              port: 5601
+            initialDelaySeconds: 90
+            periodSeconds: 30
+            failureThreshold: 5
+{{- end }}

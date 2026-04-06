@@ -1,0 +1,65 @@
+{{- if .Values.logging.enabled }}
+# DaemonSet — runs one Filebeat pod per node to collect all container logs
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: filebeat
+  labels:
+    app: filebeat
+spec:
+  selector:
+    matchLabels:
+      app: filebeat
+  template:
+    metadata:
+      labels:
+        app: filebeat
+    spec:
+      serviceAccountName: filebeat
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: filebeat
+          image: {{ .Values.logging.filebeat.image }}
+          args:
+            - "-e"
+            - "--strict.perms=false"
+          env:
+            # Used by add_kubernetes_metadata to scope API queries to this node
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          securityContext:
+            runAsUser: 0   # root required to read /var/log/containers/
+          volumeMounts:
+            - name: config
+              mountPath: /usr/share/filebeat/filebeat.yml
+              subPath: filebeat.yml
+              readOnly: true
+            # Symlinks to actual log files (in /var/log/pods/)
+            - name: varlogcontainers
+              mountPath: /var/log/containers
+              readOnly: true
+            # Actual pod log files
+            - name: varlogpods
+              mountPath: /var/log/pods
+              readOnly: true
+            # Filebeat cursor state — tracks which logs have been shipped
+            - name: data
+              mountPath: /usr/share/filebeat/data
+          resources:
+            {{- toYaml .Values.logging.filebeat.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: filebeat-config
+            defaultMode: 0640
+        - name: varlogcontainers
+          hostPath:
+            path: /var/log/containers
+        - name: varlogpods
+          hostPath:
+            path: /var/log/pods
+        - name: data
+          emptyDir: {}
+{{- end }}

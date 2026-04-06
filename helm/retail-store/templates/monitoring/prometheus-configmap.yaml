@@ -1,0 +1,43 @@
+{{- if .Values.monitoring.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+
+    scrape_configs:
+      # Go service — exposes /metrics
+      - job_name: catalog
+        static_configs:
+          - targets: ['catalog:80']
+        metrics_path: /metrics
+
+      # Java services — expose /actuator/prometheus
+      - job_name: cart
+        static_configs:
+          - targets: ['cart:80']
+        metrics_path: /actuator/prometheus
+
+      - job_name: orders
+        static_configs:
+          - targets: ['orders:80']
+        metrics_path: /actuator/prometheus
+
+      # Node service — exposes /metrics
+      - job_name: checkout
+        static_configs:
+          - targets: ['checkout:80']
+        metrics_path: /metrics
+
+      - job_name: ui
+        static_configs:
+          - targets: ['ui:80']
+        metrics_path: /actuator/prometheus
+
+      - job_name: prometheus
+        static_configs:
+          - targets: ['localhost:9090']
+{{- end }}

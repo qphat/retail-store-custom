@@ -1,0 +1,18 @@
+{{- if .Values.logging.enabled }}
+# ClusterRole — needed by add_kubernetes_metadata to enrich logs with pod info
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: filebeat
+rules:
+  - apiGroups: [""]
+    resources:
+      - namespaces
+      - pods
+      - nodes
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources:
+      - replicasets
+    verbs: ["get", "list", "watch"]
+{{- end }}

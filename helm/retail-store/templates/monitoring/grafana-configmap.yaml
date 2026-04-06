@@ -1,0 +1,20 @@
+{{- if .Values.monitoring.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-provisioning
+data:
+  # Prometheus datasource — UID pinned so dashboard JSONs can reference it
+  datasources.yml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        uid: PBFA97CFB590B2093
+        type: prometheus
+        access: proxy
+        url: http://prometheus:9090
+        isDefault: true
+        editable: false
+
+  # (dashboards.yml provider is in grafana-dashboards ConfigMap alongside the JSON files)
+{{- end }}

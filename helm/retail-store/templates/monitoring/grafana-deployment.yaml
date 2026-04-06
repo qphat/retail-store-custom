@@ -1,0 +1,60 @@
+{{- if .Values.monitoring.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  labels:
+    app: grafana
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      containers:
+        - name: grafana
+          image: {{ .Values.monitoring.grafana.image }}
+          ports:
+            - containerPort: 3000
+          env:
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              value: {{ .Values.monitoring.grafana.adminPassword | quote }}
+            # Required for serving Grafana under /grafana subpath via ingress
+            - name: GF_SERVER_ROOT_URL
+              value: "%(protocol)s://%(domain)s/grafana"
+            - name: GF_SERVER_SERVE_FROM_SUB_PATH
+              value: "true"
+          volumeMounts:
+            # Mount datasources.yml as single file into datasources dir
+            - name: provisioning
+              mountPath: /etc/grafana/provisioning/datasources/datasources.yml
+              subPath: datasources.yml
+            # Mount whole dashboards dir (contains dashboards.yml + jvm.json + go.json)
+            - name: dashboards
+              mountPath: /etc/grafana/provisioning/dashboards
+          resources:
+            {{- toYaml .Values.monitoring.grafana.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /grafana/api/health
+              port: 3000
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /grafana/api/health
+              port: 3000
+            initialDelaySeconds: 60
+            periodSeconds: 20
+      volumes:
+        - name: provisioning
+          configMap:
+            name: grafana-provisioning
+        - name: dashboards
+          configMap:
+            name: grafana-dashboards
+{{- end }}

@@ -1,0 +1,40 @@
+{{- if .Values.logging.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kibana-setup
+  annotations:
+    # Run after all resources are installed/upgraded
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "10"
+    # Delete previous job before re-running on upgrade
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 10   # retry up to 10 times — Kibana takes 60-90s to start
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: kibana-setup
+          image: curlimages/curl:8.7.1
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for Kibana to be ready..."
+              until curl -sf http://kibana:5601/kibana/api/status; do
+                sleep 10
+              done
+              echo "Creating data view..."
+              curl -s -X POST http://kibana:5601/kibana/api/data_views/data_view \
+                -H "kbn-xsrf: true" \
+                -H "Content-Type: application/json" \
+                -d '{
+                  "data_view": {
+                    "title": "logs-*",
+                    "name": "retail-store-logs",
+                    "timeFieldName": "@timestamp"
+                  }
+                }'
+              echo "Done."
+{{- end }}

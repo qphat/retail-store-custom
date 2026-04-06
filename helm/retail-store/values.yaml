@@ -82,3 +82,57 @@ services:
 ingress:
   enabled: true
   host: ""   # empty = match all hosts (localhost)
+
+monitoring:
+  enabled: true
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 300m
+        memory: 256Mi
+  grafana:
+    image: grafana/grafana:10.4.2
+    adminPassword: admin
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 300m
+        memory: 256Mi
+
+logging:
+  enabled: true
+  elasticsearch:
+    image: elasticsearch:8.13.0
+    javaOpts: "-Xms512m -Xmx512m"
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+      limits:
+        cpu: 1000m
+        memory: 2Gi
+  kibana:
+    image: kibana:8.13.0
+    nodeOptions: "--max-old-space-size=1024"
+    resources:
+      requests:
+        cpu: 200m
+        memory: 1Gi
+      limits:
+        cpu: 1000m
+        memory: 1536Mi
+  filebeat:
+    image: elastic/filebeat:8.13.0
+    resources:
+      requests:
+        cpu: 100m
+        memory: 64Mi
+      limits:
+        cpu: 300m
+        memory: 128Mi

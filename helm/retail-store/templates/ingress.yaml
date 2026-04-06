@@ -4,17 +4,43 @@ kind: Ingress
 metadata:
   name: retail-store
   annotations:
-    nginx.ingress.kubernetes.io/rewrite-target: /
+    # $2 captures everything after the matched prefix — strips /grafana, /kibana
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
 spec:
   ingressClassName: nginx
   rules:
     - http:
         paths:
-          - path: /
-            pathType: Prefix
+          # Main app — capture group needed to be compatible with rewrite-target: /$2
+          - path: /()(.*)
+            pathType: ImplementationSpecific
             backend:
               service:
                 name: ui
                 port:
                   number: 80
+
+          {{- if .Values.monitoring.enabled }}
+          # Grafana — strips /grafana prefix before forwarding
+          # Grafana itself must have GF_SERVER_SERVE_FROM_SUB_PATH=true
+          - path: /grafana(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: grafana
+                port:
+                  number: 3000
+          {{- end }}
+
+          {{- if .Values.logging.enabled }}
+          # Kibana — strips /kibana prefix before forwarding
+          # Kibana itself must have SERVER_BASEPATH=/kibana
+          - path: /kibana(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: kibana
+                port:
+                  number: 5601
+          {{- end }}
 {{- end }}

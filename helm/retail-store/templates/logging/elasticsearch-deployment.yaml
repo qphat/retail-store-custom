@@ -1,0 +1,55 @@
+{{- if .Values.logging.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: elasticsearch
+  labels:
+    app: elasticsearch
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: elasticsearch
+  template:
+    metadata:
+      labels:
+        app: elasticsearch
+    spec:
+      initContainers:
+        # ES 8.x requires vm.max_map_count >= 262144 — set on the host node
+        - name: set-vm-max-map-count
+          image: busybox
+          command: ['sysctl', '-w', 'vm.max_map_count=262144']
+          securityContext:
+            privileged: true
+      containers:
+        - name: elasticsearch
+          image: {{ .Values.logging.elasticsearch.image }}
+          ports:
+            - containerPort: 9200
+          env:
+            - name: discovery.type
+              value: single-node
+            - name: xpack.security.enabled
+              value: "false"
+            - name: xpack.security.http.ssl.enabled
+              value: "false"
+            - name: ES_JAVA_OPTS
+              value: {{ .Values.logging.elasticsearch.javaOpts | quote }}
+          resources:
+            {{- toYaml .Values.logging.elasticsearch.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /_cluster/health
+              port: 9200
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 5
+          livenessProbe:
+            httpGet:
+              path: /_cluster/health
+              port: 9200
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 5
+{{- end }}
