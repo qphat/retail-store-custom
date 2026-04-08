@@ -1,5 +1,9 @@
 terraform {
-  backend "local" {
-    path = "staging.tfstate"
+  backend "s3" {
+    bucket         = "retail-store-tf-state"
+    key            = "retail-store/staging/terraform.tfstate"
+    region         = "us-east-1"
+    dynamodb_table = "retail-store-tf-lock"
+    encrypt        = true
   }
 }
