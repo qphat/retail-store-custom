@@ -1,0 +1,281 @@
+name: Terraform
+
+on:
+  pull_request:
+    branches: [main]
+    paths: ['terraform/**']
+  push:
+    branches: [main]
+    paths: ['terraform/**']
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to apply'
+        type: choice
+        options: [dev, staging, prod]
+        required: true
+
+permissions:
+  contents: read
+  id-token: write        # OIDC token
+  pull-requests: write   # post plan comments
+  issues: write          # security scan annotations
+  security-events: write # SARIF upload
+
+# One terraform run per env at a time — queued, never cancelled mid-apply
+concurrency:
+  group: terraform-${{ github.event.inputs.environment || 'dev' }}
+  cancel-in-progress: false
+
+env:
+  TF_PLUGIN_CACHE_DIR: ~/.terraform.d/plugin-cache
+
+jobs:
+  # ── Detect which environments changed (PR only) ───────────────────────────
+  detect-env:
+    name: Detect changed environments
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    outputs:
+      envs: ${{ steps.filter.outputs.changes }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            dev:
+              - 'terraform/environments/dev/**'
+              - 'terraform/modules/**'
+              - 'terraform/global/**'
+            staging:
+              - 'terraform/environments/staging/**'
+              - 'terraform/modules/**'
+            prod:
+              - 'terraform/environments/prod/**'
+              - 'terraform/modules/**'
+
+  # ── Lint: fmt + validate (fast, no AWS creds needed) ─────────────────────
+  lint:
+    name: Lint (fmt + validate)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Create plugin cache dir
+        run: mkdir -p $TF_PLUGIN_CACHE_DIR
+
+      - name: terraform fmt check
+        run: terraform fmt -check -recursive terraform/
+
+      - name: terraform validate (dev)
+        working-directory: terraform/environments/dev
+        run: |
+          terraform init -backend=false
+          terraform validate
+
+      - name: terraform validate (staging)
+        working-directory: terraform/environments/staging
+        run: |
+          terraform init -backend=false
+          terraform validate
+
+      - name: terraform validate (prod)
+        working-directory: terraform/environments/prod
+        run: |
+          terraform init -backend=false
+          terraform validate
+
+  # ── Security scan: tfsec + checkov ───────────────────────────────────────
+  security-scan:
+    name: Security Scan (tfsec + checkov)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+
+      # tfsec — fast, AWS-aware, inline suppressions with #tfsec:ignore
+      - name: Run tfsec
+        uses: aquasecurity/tfsec-action@v1
+        with:
+          working_directory: terraform/
+          soft_fail: false
+          format: sarif
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      # checkov — broader policy engine, catches misconfigs tfsec misses
+      - name: Run checkov
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: terraform/
+          framework: terraform
+          soft_fail: false
+          output_format: sarif
+          output_file_path: checkov-results.sarif
+        continue-on-error: true   # upload SARIF even on failure
+
+      - name: Upload checkov SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: checkov-results.sarif
+
+  # ── Plan: one job per changed environment ────────────────────────────────
+  plan:
+    name: Plan (${{ matrix.environment }})
+    runs-on: ubuntu-latest
+    needs: detect-env
+    if: |
+      github.event_name == 'pull_request' &&
+      needs.detect-env.outputs.envs != '[]' &&
+      needs.detect-env.outputs.envs != ''
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: ${{ fromJson(needs.detect-env.outputs.envs) }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Cache Terraform plugins
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.TF_PLUGIN_CACHE_DIR }}
+          key: terraform-${{ runner.os }}-${{ hashFiles('**/.terraform.lock.hcl') }}
+          restore-keys: terraform-${{ runner.os }}-
+
+      - name: Create plugin cache dir
+        run: mkdir -p $TF_PLUGIN_CACHE_DIR
+
+      - name: terraform init
+        working-directory: terraform/environments/${{ matrix.environment }}
+        run: terraform init -lock-timeout=5m
+
+      - name: terraform plan
+        id: plan
+        working-directory: terraform/environments/${{ matrix.environment }}
+        run: |
+          terraform plan \
+            -no-color \
+            -lock-timeout=5m \
+            -out=tfplan 2>&1 | tee plan.txt
+          echo "exit_code=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
+
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ matrix.environment }}-${{ github.run_id }}
+          path: |
+            terraform/environments/${{ matrix.environment }}/tfplan
+            terraform/environments/${{ matrix.environment }}/plan.txt
+          retention-days: 3
+
+      # Post/update a single comment per environment on the PR
+      - name: Post plan to PR
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          issue-number: ${{ github.event.pull_request.number }}
+          comment-id: ${{ steps.plan-comment.outputs.comment-id }}
+          edit-mode: replace
+          body: |
+            ## Terraform Plan — `${{ matrix.environment }}`
+
+            <details>
+            <summary>Show plan</summary>
+
+            ```hcl
+            ${{ steps.plan.outputs.stdout }}
+            ```
+            </details>
+
+            Commit: `${{ github.sha }}`
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+  # ── Apply dev (auto on merge to main) ────────────────────────────────────
+  apply-dev:
+    name: Apply (dev)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    environment: dev   # no protection — auto-deploys
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Cache Terraform plugins
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.TF_PLUGIN_CACHE_DIR }}
+          key: terraform-${{ runner.os }}-${{ hashFiles('**/.terraform.lock.hcl') }}
+          restore-keys: terraform-${{ runner.os }}-
+
+      - name: Create plugin cache dir
+        run: mkdir -p $TF_PLUGIN_CACHE_DIR
+
+      - name: terraform init
+        working-directory: terraform/environments/dev
+        run: terraform init -lock-timeout=5m
+
+      - name: terraform apply
+        working-directory: terraform/environments/dev
+        run: terraform apply -auto-approve -lock-timeout=5m
+
+  # ── Apply staging/prod (manual dispatch with approval gate) ──────────────
+  apply-manual:
+    name: Apply (${{ github.event.inputs.environment }})
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    # GitHub Environment protection rules control who can approve:
+    #   staging → requires 1 reviewer
+    #   prod    → requires 1 reviewer + 5 min wait timer
+    environment: ${{ github.event.inputs.environment }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Cache Terraform plugins
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.TF_PLUGIN_CACHE_DIR }}
+          key: terraform-${{ runner.os }}-${{ hashFiles('**/.terraform.lock.hcl') }}
+          restore-keys: terraform-${{ runner.os }}-
+
+      - name: Create plugin cache dir
+        run: mkdir -p $TF_PLUGIN_CACHE_DIR
+
+      - name: terraform init
+        working-directory: terraform/environments/${{ github.event.inputs.environment }}
+        run: terraform init -lock-timeout=5m
+
+      - name: terraform plan (preview before apply)
+        working-directory: terraform/environments/${{ github.event.inputs.environment }}
+        run: terraform plan -no-color -lock-timeout=5m
+
+      - name: terraform apply
+        working-directory: terraform/environments/${{ github.event.inputs.environment }}
+        run: terraform apply -auto-approve -lock-timeout=5m

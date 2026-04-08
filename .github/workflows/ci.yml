@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+  id-token: write   # OIDC for AWS credentials
+
 jobs:
   # ──────────────────────────────────────────────
   # Job 1: Detect which services changed
@@ -66,13 +70,14 @@ jobs:
   # Job 2: Build matrix — one job per changed service
   #
   # matrix.service comes from the JSON array above.
-  # matrix.include attaches runtime metadata to each service name.
-  # Setup steps use `if: matrix.runtime == '...'` to pick the right toolchain.
+  # matrix.include attaches runtime metadata + ECS metadata to each service.
+  # health-path: ALB path to verify after deploy
+  # ecs-cluster: ECS cluster name for this environment
   #
   # Adding a new service = 1 new line in `include` + filter above.
   # ──────────────────────────────────────────────
   build:
-    name: ${{ matrix.service }}
+    name: Build — ${{ matrix.service }}
     runs-on: ubuntu-latest
     needs: detect-changes
     # Skip entire job if nothing changed
@@ -85,25 +90,30 @@ jobs:
           - service: catalog
             runtime: go
             cache-dep-path: src/catalog/go.sum
+            health-path: /health
 
           - service: cart
             runtime: java
             java-version: '21'
             cache-dep-path: src/cart/pom.xml
+            health-path: /actuator/health
 
           - service: orders
             runtime: java
             java-version: '21'
             cache-dep-path: src/orders/pom.xml
+            health-path: /actuator/health
 
           - service: checkout
             runtime: node
             node-version: '22'
+            health-path: /health
 
           - service: ui
             runtime: java
             java-version: '21'
             cache-dep-path: src/ui/pom.xml
+            health-path: /actuator/health
 
     steps:
       - uses: actions/checkout@v4
@@ -177,3 +187,230 @@ jobs:
           tags: |
             ${{ vars.IMAGE_PREFIX }}-${{ matrix.service }}:${{ github.sha }}
             ${{ vars.IMAGE_PREFIX }}-${{ matrix.service }}:latest
+
+  # ──────────────────────────────────────────────
+  # Job 3: Deploy to ECS — one job per changed service
+  #
+  # Runs only on push to main (after images are pushed).
+  # Registers a NEW task definition revision with the exact SHA image tag,
+  # then updates the ECS service to use it. This gives:
+  #   - Full audit trail (each revision = one deploy = one git SHA)
+  #   - Safe rollback: aws ecs update-service --task-definition dev-catalog:N-1
+  #   - No `:latest` surprise deploys (SHA is pinned in the task def)
+  #
+  # Concurrency: one deploy per service at a time, queued (not cancelled).
+  # ──────────────────────────────────────────────
+  deploy:
+    name: Deploy — ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'push'
+    # Queue concurrent deploys for the same service — never cancel mid-deploy
+    concurrency:
+      group: ecs-deploy-${{ matrix.service }}
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJson(needs.detect-changes.outputs.services) }}
+        include:
+          - service: catalog
+            health-path: /health
+          - service: cart
+            health-path: /actuator/health
+          - service: orders
+            health-path: /actuator/health
+          - service: checkout
+            health-path: /health
+          - service: ui
+            health-path: /actuator/health
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      # ── Step 1: Download current task definition ──
+      - name: Download current task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition dev-${{ matrix.service }} \
+            --query taskDefinition \
+            > task-def.json
+          echo "Current task def family: $(jq -r .family task-def.json)"
+
+      # ── Step 2: Tag task definition with deploy metadata ──
+      # Adds GitSHA, RunID, and DeployedBy so you can trace which CI run
+      # created this revision from the ECS console or AWS CLI.
+      - name: Tag task definition with deploy metadata
+        run: |
+          jq '.tags = (.tags // []) + [
+            {"key": "GitSHA",     "value": "${{ github.sha }}"},
+            {"key": "RunID",      "value": "${{ github.run_id }}"},
+            {"key": "DeployedBy", "value": "github-actions"},
+            {"key": "Service",    "value": "${{ matrix.service }}"}
+          ]' task-def.json > task-def-tagged.json
+
+      # ── Step 3: Render new task definition with SHA image tag ──
+      # Updates the container image from `:latest` → `:{sha}`
+      # so the task definition revision is pinned to an exact image.
+      - name: Render task definition with new image
+        id: render-task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-def-tagged.json
+          container-name: ${{ matrix.service }}
+          image: ${{ vars.IMAGE_PREFIX }}-${{ matrix.service }}:${{ github.sha }}
+
+      # ── Step 4: Register new revision + update ECS service ──
+      # Retried up to 3 times to handle transient AWS API errors.
+      - name: Deploy to ECS (with retry)
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 15
+          max_attempts: 3
+          retry_wait_seconds: 30
+          command: |
+            echo "Deploying ${{ matrix.service }} with image ${{ github.sha }}..."
+            node -e "
+              const core = require('@actions/core');
+            " 2>/dev/null || true  # ignore if @actions/core not available
+
+            # Use the official action via shell (retry wraps the whole step)
+            cat << 'EOF' > /tmp/deploy.yml
+            steps:
+              - uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+                with:
+                  task-definition: ${{ steps.render-task-def.outputs.task-definition }}
+                  service: dev-${{ matrix.service }}
+                  cluster: dev-retail-store
+                  wait-for-service-stability: true
+                  wait-for-minutes: 10
+            EOF
+
+            # Direct CLI deploy (retry-compatible)
+            TASK_DEF_ARN=$(aws ecs register-task-definition \
+              --cli-input-json file://${{ steps.render-task-def.outputs.task-definition }} \
+              --query 'taskDefinition.taskDefinitionArn' \
+              --output text)
+
+            echo "Registered task definition: $TASK_DEF_ARN"
+
+            aws ecs update-service \
+              --cluster dev-retail-store \
+              --service dev-${{ matrix.service }} \
+              --task-definition "$TASK_DEF_ARN"
+
+            echo "Waiting for service to stabilise..."
+            aws ecs wait services-stable \
+              --cluster dev-retail-store \
+              --services dev-${{ matrix.service }}
+
+            echo "Service stable."
+
+      # ── Step 5: HTTP health check via ALB ──
+      # Verifies the NEW task is actually serving requests, not just
+      # that ECS thinks it's healthy. Retries for up to 2.5 min.
+      - name: HTTP health check via ALB
+        run: |
+          ALB=$(aws elbv2 describe-load-balancers \
+            --names dev-retail-store \
+            --query 'LoadBalancers[0].DNSName' \
+            --output text)
+
+          URL="http://$ALB${{ matrix.health-path }}"
+          echo "Checking $URL ..."
+
+          for i in $(seq 1 10); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "$URL" || echo "000")
+            if [ "$STATUS" = "200" ]; then
+              echo "✓ Health check passed on attempt $i (HTTP $STATUS)"
+              exit 0
+            fi
+            echo "  attempt $i: HTTP $STATUS — retrying in 15s..."
+            sleep 15
+          done
+
+          echo "✗ Health check failed after 10 attempts"
+          exit 1
+
+  # ──────────────────────────────────────────────
+  # Job 4: Smoke test — ALL services through the ALB
+  #
+  # Runs after ALL deploy matrix jobs finish.
+  # Verifies every service responds correctly together —
+  # catches inter-service issues that per-service health checks miss:
+  #   - ALB listener rule conflicts
+  #   - Cloud Map DNS resolution failures
+  #   - Broken env vars (ui can't reach catalog)
+  # ──────────────────────────────────────────────
+  smoke-test:
+    name: Smoke Test — All Services
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: github.event_name == 'push'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Get ALB DNS
+        id: alb
+        run: |
+          DNS=$(aws elbv2 describe-load-balancers \
+            --names dev-retail-store \
+            --query 'LoadBalancers[0].DNSName' \
+            --output text)
+          echo "dns=$DNS" >> $GITHUB_OUTPUT
+          echo "ALB: $DNS"
+
+      - name: Smoke test — all services
+        run: |
+          BASE="http://${{ steps.alb.outputs.dns }}"
+          FAILED=0
+
+          # check <name> <url> <expected_status>
+          check() {
+            local name=$1
+            local url=$2
+            local expected=$3
+
+            for i in $(seq 1 5); do
+              STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$url" || echo "000")
+              if [ "$STATUS" = "$expected" ]; then
+                echo "✓ $name → $STATUS"
+                return 0
+              fi
+              echo "  $name attempt $i: got $STATUS, expected $expected"
+              sleep 10
+            done
+
+            echo "✗ $name FAILED after 5 attempts"
+            FAILED=$((FAILED + 1))
+          }
+
+          # ── Check all 5 services + Kibana ──
+          check "ui"       "$BASE/"                     "200"
+          check "catalog"  "$BASE/catalogue"            "200"
+          check "cart"     "$BASE/api/cart/health"      "200"
+          check "orders"   "$BASE/api/orders/health"    "200"
+          check "checkout" "$BASE/api/checkout/health"  "200"
+          check "kibana"   "$BASE/kibana/api/status"    "200"
+
+          if [ $FAILED -gt 0 ]; then
+            echo ""
+            echo "✗ $FAILED service(s) failed smoke test — rolling back is recommended"
+            exit 1
+          fi
+
+          echo ""
+          echo "✓ All services healthy"

@@ -1,0 +1,189 @@
+name: Terraform Drift Detection
+
+on:
+  schedule:
+    - cron: '0 6 * * 1-5'   # 06:00 UTC Mon-Fri = 13:00 Vietnam time
+  workflow_dispatch:          # run manually anytime
+
+permissions:
+  contents: read
+  id-token: write   # OIDC
+  issues: write     # open GitHub Issue on drift
+
+env:
+  TF_PLUGIN_CACHE_DIR: ~/.terraform.d/plugin-cache
+
+jobs:
+  detect-drift:
+    name: Drift — ${{ matrix.environment }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false   # check all envs even if one has drift
+      matrix:
+        environment: [dev, staging, prod]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Cache Terraform plugins
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.TF_PLUGIN_CACHE_DIR }}
+          key: terraform-${{ runner.os }}-${{ hashFiles('**/.terraform.lock.hcl') }}
+          restore-keys: terraform-${{ runner.os }}-
+
+      - name: Create plugin cache dir
+        run: mkdir -p $TF_PLUGIN_CACHE_DIR
+
+      - name: terraform init
+        working-directory: terraform/environments/${{ matrix.environment }}
+        run: terraform init -lock-timeout=2m
+
+      - name: terraform plan (drift check)
+        id: plan
+        working-directory: terraform/environments/${{ matrix.environment }}
+        run: |
+          # -detailed-exitcode:
+          #   0 = no changes (no drift)
+          #   1 = error
+          #   2 = changes detected (drift!)
+          #
+          # -lock=false: read-only refresh — don't acquire state lock.
+          # Drift detection never writes state, so locking is unnecessary
+          # and would block real applies running at the same time.
+          set +e
+          terraform plan \
+            -detailed-exitcode \
+            -lock=false \
+            -refresh=true \
+            -no-color \
+            -out=drift.tfplan 2>&1 | tee plan.txt
+          EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+
+          echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
+
+          case $EXIT_CODE in
+            0)
+              echo "has_drift=false" >> $GITHUB_OUTPUT
+              echo "✓ No drift detected in ${{ matrix.environment }}"
+              ;;
+            2)
+              echo "has_drift=true" >> $GITHUB_OUTPUT
+              echo "⚠ DRIFT DETECTED in ${{ matrix.environment }}"
+              ;;
+            *)
+              echo "Plan command failed (exit $EXIT_CODE)"
+              exit 1
+              ;;
+          esac
+
+      - name: Upload drift plan artifact
+        if: steps.plan.outputs.has_drift == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: drift-${{ matrix.environment }}-${{ github.run_id }}
+          path: terraform/environments/${{ matrix.environment }}/plan.txt
+          retention-days: 7
+
+      - name: Open or update GitHub Issue on drift
+        if: steps.plan.outputs.has_drift == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const env   = '${{ matrix.environment }}';
+            const runId = '${{ github.run_id }}';
+            const sha   = '${{ github.sha }}';
+
+            // Truncate plan output — GitHub issue body has a 65535 char limit
+            const raw  = fs.readFileSync(
+              `terraform/environments/${env}/plan.txt`, 'utf8'
+            );
+            const plan = raw.length > 4000
+              ? raw.slice(0, 4000) + '\n... (truncated, see artifact)'
+              : raw;
+
+            const runUrl = `${{ github.server_url }}/${{ github.repository }}/actions/runs/${runId}`;
+
+            const body = [
+              `## Terraform Drift — \`${env}\``,
+              ``,
+              `**Detected:** ${new Date().toISOString()}`,
+              `**Commit:** \`${sha}\``,
+              `**Run:** ${runUrl}`,
+              `**Artifact:** Full plan in Actions → drift-${env}-${runId}`,
+              ``,
+              `<details><summary>Plan output (first 4000 chars)</summary>`,
+              ``,
+              '```hcl',
+              plan,
+              '```',
+              ``,
+              `</details>`,
+              ``,
+              `**To resolve:**`,
+              `- If intentional: run \`terraform apply\` for \`${env}\` via workflow dispatch`,
+              `- If unintentional: investigate who changed it and revert`,
+              `- Close this issue after resolving`,
+            ].join('\n');
+
+            // Check for existing open drift issue for this env to avoid duplicates
+            const { data: existing } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              state: 'open',
+              labels: `terraform-drift,${env}`,
+            });
+
+            if (existing.length === 0) {
+              // No open issue — create a new one
+              await github.rest.issues.create({
+                owner:  context.repo.owner,
+                repo:   context.repo.repo,
+                title:  `[Drift] Terraform drift in \`${env}\``,
+                body,
+                labels: ['terraform-drift', env],
+              });
+              console.log(`Created new drift issue for ${env}`);
+            } else {
+              // Issue already exists — add a comment (no duplicate issues)
+              await github.rest.issues.createComment({
+                owner:      context.repo.owner,
+                repo:       context.repo.repo,
+                issue_number: existing[0].number,
+                body: [
+                  `## Drift still present — ${new Date().toISOString()}`,
+                  `Run: ${runUrl}`,
+                  ``,
+                  '<details><summary>Plan output</summary>',
+                  '',
+                  '```hcl',
+                  plan,
+                  '```',
+                  '',
+                  '</details>',
+                ].join('\n'),
+              });
+              console.log(`Updated existing drift issue #${existing[0].number} for ${env}`);
+            }
+
+  # ── Summary job — always runs, prints overall result ──────────────────────
+  summary:
+    name: Drift Summary
+    runs-on: ubuntu-latest
+    needs: detect-drift
+    if: always()
+    steps:
+      - name: Print summary
+        run: |
+          echo "Drift detection complete for all environments."
+          echo "Check GitHub Issues with label 'terraform-drift' for any detected drift."
+          echo "Run URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

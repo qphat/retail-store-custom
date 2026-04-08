@@ -4,6 +4,7 @@ CLAUDE.md
 
 .DS_Store
 *.tfvars
+!terraform/environments/*/terraform.tfvars
 .terraform
 *.tfstate*
 *.lock.hcl
