@@ -203,7 +203,7 @@ jobs:
   deploy:
     name: Deploy — ${{ matrix.service }}
     runs-on: ubuntu-latest
-    needs: build
+    needs: [build, detect-changes]
     if: github.event_name == 'push'
     # Queue concurrent deploys for the same service — never cancel mid-deploy
     concurrency:
