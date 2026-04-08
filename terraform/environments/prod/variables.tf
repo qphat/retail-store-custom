@@ -50,6 +50,54 @@ variable "catalog_desired_count" {
   default = 1
 }
 
+# ── Cart service sizing ───────────────────────────────────────────────────────
+variable "cart_cpu" {
+  type    = number
+  default = 512
+}
+
+variable "cart_memory" {
+  type    = number
+  default = 1024
+}
+
+variable "cart_desired_count" {
+  type    = number
+  default = 1
+}
+
+# ── Orders service sizing ─────────────────────────────────────────────────────
+variable "orders_cpu" {
+  type    = number
+  default = 512
+}
+
+variable "orders_memory" {
+  type    = number
+  default = 1024
+}
+
+variable "orders_desired_count" {
+  type    = number
+  default = 1
+}
+
+# ── Checkout service sizing ───────────────────────────────────────────────────
+variable "checkout_cpu" {
+  type    = number
+  default = 256
+}
+
+variable "checkout_memory" {
+  type    = number
+  default = 512
+}
+
+variable "checkout_desired_count" {
+  type    = number
+  default = 1
+}
+
 # ── Elasticsearch sizing ──────────────────────────────────────────────────────
 variable "es_cpu" {
   type    = number
@@ -74,5 +122,5 @@ variable "kibana_cpu" {
 
 variable "kibana_memory" {
   type    = number
-  default = 1536
+  default = 1024
 }

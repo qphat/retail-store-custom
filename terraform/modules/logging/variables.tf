@@ -70,7 +70,7 @@ variable "kibana_cpu" {
 
 variable "kibana_memory" {
   type    = number
-  default = 1536
+  default = 1024
 }
 
 variable "aws_region" {

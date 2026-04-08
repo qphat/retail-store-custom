@@ -62,9 +62,11 @@ module "catalog_service" {
   cluster_id          = module.ecs_cluster.cluster_id
   cluster_name        = module.ecs_cluster.cluster_name
   vpc_id              = module.vpc.vpc_id
+  vpc_cidr            = var.cidr_block
   private_subnet_ids  = module.vpc.private_subnet_ids
   alb_listener_arn    = module.alb.alb_listener_arn
   alb_sg_id           = module.alb.alb_sg_id
+  cloud_map_namespace_id = module.logging.cloud_map_namespace_id
 
   container_image   = "koomi1/retail-app-catalog:latest"
   container_port    = 8080
@@ -92,7 +94,126 @@ module "catalog_service" {
   depends_on = [module.logging]
 }
 
-# ── 6. UI Service (Java/Spring Boot — needs longer start period for JVM) ──────
+# ── 6. Cart Service (Java/Spring Boot — in-memory persistence for dev) ───────
+module "cart_service" {
+  source             = "../../modules/ecs-service"
+  service_name       = "cart"
+  env_name           = var.env_name
+  cluster_id         = module.ecs_cluster.cluster_id
+  cluster_name       = module.ecs_cluster.cluster_name
+  vpc_id             = module.vpc.vpc_id
+  vpc_cidr           = var.cidr_block
+  private_subnet_ids = module.vpc.private_subnet_ids
+  alb_listener_arn   = module.alb.alb_listener_arn
+  alb_sg_id          = module.alb.alb_sg_id
+  cloud_map_namespace_id = module.logging.cloud_map_namespace_id
+
+  container_image   = "koomi1/retail-app-cart:latest"
+  container_port    = 8080
+  health_check_path = "/actuator/health"
+  cpu               = var.cart_cpu
+  memory            = var.cart_memory
+  desired_count     = var.cart_desired_count
+
+  listener_path     = "/api/cart*"
+  listener_priority = 20
+
+  elasticsearch_url = module.logging.elasticsearch_url
+
+  health_check_start_period = 60
+  health_check_interval     = 30
+
+  environment_vars = {
+    RETAIL_CART_PERSISTENCE_PROVIDER = "in-memory"
+  }
+
+  aws_region = var.aws_region
+  tags       = local.common_tags
+
+  depends_on = [module.logging]
+}
+
+# ── 7. Orders Service (Java/Spring Boot — in-memory persistence for dev) ──────
+module "orders_service" {
+  source             = "../../modules/ecs-service"
+  service_name       = "orders"
+  env_name           = var.env_name
+  cluster_id         = module.ecs_cluster.cluster_id
+  cluster_name       = module.ecs_cluster.cluster_name
+  vpc_id             = module.vpc.vpc_id
+  vpc_cidr           = var.cidr_block
+  private_subnet_ids = module.vpc.private_subnet_ids
+  alb_listener_arn   = module.alb.alb_listener_arn
+  alb_sg_id          = module.alb.alb_sg_id
+  cloud_map_namespace_id = module.logging.cloud_map_namespace_id
+
+  container_image   = "koomi1/retail-app-orders:latest"
+  container_port    = 8080
+  health_check_path = "/actuator/health"
+  cpu               = var.orders_cpu
+  memory            = var.orders_memory
+  desired_count     = var.orders_desired_count
+
+  listener_path     = "/api/orders*"
+  listener_priority = 30
+
+  elasticsearch_url = module.logging.elasticsearch_url
+
+  health_check_start_period = 60
+  health_check_interval     = 30
+
+  environment_vars = {
+    RETAIL_ORDERS_PERSISTENCE_PROVIDER = "in-memory"
+    RETAIL_ORDERS_MESSAGING_PROVIDER   = "in-memory"
+  }
+
+  aws_region = var.aws_region
+  tags       = local.common_tags
+
+  depends_on = [module.logging]
+}
+
+# ── 8. Checkout Service (Node/NestJS — fastest startup) ──────────────────────
+module "checkout_service" {
+  source             = "../../modules/ecs-service"
+  service_name       = "checkout"
+  env_name           = var.env_name
+  cluster_id         = module.ecs_cluster.cluster_id
+  cluster_name       = module.ecs_cluster.cluster_name
+  vpc_id             = module.vpc.vpc_id
+  vpc_cidr           = var.cidr_block
+  private_subnet_ids = module.vpc.private_subnet_ids
+  alb_listener_arn   = module.alb.alb_listener_arn
+  alb_sg_id          = module.alb.alb_sg_id
+  cloud_map_namespace_id = module.logging.cloud_map_namespace_id
+
+  container_image   = "koomi1/retail-app-checkout:latest"
+  container_port    = 8080
+  health_check_path = "/health"
+  cpu               = var.checkout_cpu
+  memory            = var.checkout_memory
+  desired_count     = var.checkout_desired_count
+
+  listener_path     = "/api/checkout*"
+  listener_priority = 40
+
+  elasticsearch_url = module.logging.elasticsearch_url
+
+  health_check_start_period = 10
+  health_check_interval     = 20
+
+  environment_vars = {
+    RETAIL_CHECKOUT_PERSISTENCE_PROVIDER = "in-memory"
+    RETAIL_CHECKOUT_ENDPOINTS_ORDERS     = "http://orders.${var.env_name}.local:8080"
+  }
+
+  aws_region = var.aws_region
+  tags       = local.common_tags
+
+  depends_on = [module.logging]
+}
+
+# ── 9. UI Service (Java/Spring Boot — needs longer start period for JVM) ──────
 module "ui_service" {
   source              = "../../modules/ecs-service"
   service_name        = "ui"
@@ -100,9 +221,11 @@ module "ui_service" {
   cluster_id          = module.ecs_cluster.cluster_id
   cluster_name        = module.ecs_cluster.cluster_name
   vpc_id              = module.vpc.vpc_id
+  vpc_cidr            = var.cidr_block
   private_subnet_ids  = module.vpc.private_subnet_ids
   alb_listener_arn    = module.alb.alb_listener_arn
   alb_sg_id           = module.alb.alb_sg_id
+  cloud_map_namespace_id = module.logging.cloud_map_namespace_id
 
   container_image   = "koomi1/retail-app-ui:latest"
   container_port    = 8080
@@ -123,10 +246,10 @@ module "ui_service" {
   # Inter-service URLs use Cloud Map DNS names ({service}.{env}.local)
   # Same env vars as K8s deployment — only the values change (K8s: http://catalog, ECS: http://catalog.dev.local)
   environment_vars = {
-    RETAIL_UI_ENDPOINTS_CATALOG  = "http://catalog.${var.env_name}.local"
-    RETAIL_UI_ENDPOINTS_CARTS    = "http://cart.${var.env_name}.local"
-    RETAIL_UI_ENDPOINTS_CHECKOUT = "http://checkout.${var.env_name}.local"
-    RETAIL_UI_ENDPOINTS_ORDERS   = "http://orders.${var.env_name}.local"
+    RETAIL_UI_ENDPOINTS_CATALOG  = "http://catalog.${var.env_name}.local:8080"
+    RETAIL_UI_ENDPOINTS_CARTS    = "http://cart.${var.env_name}.local:8080"
+    RETAIL_UI_ENDPOINTS_CHECKOUT = "http://checkout.${var.env_name}.local:8080"
+    RETAIL_UI_ENDPOINTS_ORDERS   = "http://orders.${var.env_name}.local:8080"
   }
 
   aws_region = var.aws_region

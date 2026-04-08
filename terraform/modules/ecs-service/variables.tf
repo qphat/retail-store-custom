@@ -23,6 +23,12 @@ variable "vpc_id" {
   description = "VPC ID"
 }
 
+variable "vpc_cidr" {
+  type        = string
+  description = "VPC CIDR — allows inter-service calls within the VPC"
+  default     = "10.0.0.0/16"
+}
+
 variable "private_subnet_ids" {
   type        = list(string)
   description = "Private subnets to run the ECS tasks in"
@@ -90,6 +96,13 @@ variable "listener_path" {
 variable "listener_priority" {
   type        = number
   description = "ALB listener rule priority (lower = evaluated first). Must be unique per listener."
+}
+
+# ── Service Discovery (Cloud Map) ────────────────────────────────────────────
+
+variable "cloud_map_namespace_id" {
+  type        = string
+  description = "Cloud Map private DNS namespace ID ({env}.local) for service-to-service discovery"
 }
 
 # ── Logging / FireLens ────────────────────────────────────────────────────────

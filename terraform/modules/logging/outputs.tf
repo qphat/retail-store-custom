@@ -10,3 +10,7 @@ output "elasticsearch_sg_id" {
 output "kibana_url" {
   value = "http://<alb-dns>/kibana"
 }
+
+output "cloud_map_namespace_id" {
+  value = aws_service_discovery_private_dns_namespace.main.id
+}

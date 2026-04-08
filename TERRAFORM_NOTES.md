@@ -1,7 +1,7 @@
-# Terraform Notes — ECS Fargate + EFK on LocalStack
+# Terraform Notes — ECS Fargate + EFK on AWS
 
 Learning notes for the retail-store-sample-app Terraform infrastructure.
-Covers concepts from scratch through multi-environment ECS Fargate with EFK logging.
+Covers concepts from scratch through multi-environment ECS Fargate with EFK logging on real AWS.
 
 ---
 
@@ -1134,6 +1134,112 @@ Rule: heap = memory / 2, never exceed 31GB (JVM compressed pointers limit).
 **Cause:** Custom Fluent Bit config file path doesn't exist in container.
 **Fix:** When using `config-file-value`, the file must exist at that path in the image.
 Alternative: use the AWS-managed default config (remove `firelensConfiguration.options`).
+
+### `InternalError: missing output key Name which is required for fireLens configuration`
+
+**Cause:** The `awsfirelens` log driver `options` block is missing the `Name` key.
+Without `Name`, ECS doesn't know which Fluent Bit output plugin to use.
+
+**Fix:** Add `Name` + connection details to the app container's `logConfiguration.options`:
+```hcl
+logConfiguration = {
+  logDriver = "awsfirelens"
+  options = {
+    "Name"        = "es"
+    "Host"        = "elasticsearch.dev.local"
+    "Port"        = "9200"
+    "Index"       = "logs-catalog"
+    "Type"        = "_doc"
+    "Retry_Limit" = "2"
+    "tls"         = "Off"
+  }
+}
+```
+
+Also remove `config-file-type` / `config-file-value` from `firelensConfiguration.options`
+to use AWS-managed config (the custom config file approach requires the file to be baked
+into the Fluent Bit image).
+
+### `No Fargate configuration exists for given values: 512 CPU, 1536 memory`
+
+**Cause:** Fargate only supports specific CPU/memory pairs.
+**Fix:** Use a valid combination:
+
+| CPU | Valid memory values (MB) |
+|---|---|
+| 256 | 512, 1024, 2048 |
+| 512 | 1024, 2048, 3072, 4096 |
+| 1024 | 2048, 3072, 4096, 5120, 6144, 7168, 8192 |
+| 2048 | 4096–16384 (in 1024 steps) |
+| 4096 | 8192–30720 (in 1024 steps) |
+
+Check both the module `variables.tf` default AND the environment `terraform.tfvars` —
+tfvars override defaults so both must be updated.
+
+### `Error: Backend configuration changed` on `terraform init`
+
+**Cause:** `.terraform/` cache has the old backend config (e.g. changed from
+`dynamodb_table` to `use_lockfile`).
+**Fix:**
+```bash
+terraform init -reconfigure   # clears cache, uses new config
+```
+
+### `S3 bucket "retail-store-tf-state" does not exist`
+
+**Cause:** `setup-backend.sh` patches `dev/staging/prod` backend files but misses
+`global/provider.tf` — which still had the placeholder bucket name without the account ID.
+**Fix:** Manually update `terraform/global/provider.tf`:
+```hcl
+bucket = "retail-store-tf-state-{account_id}"
+```
+
+### `dynamodb_table` parameter deprecated warning
+
+**Cause:** Terraform AWS provider ≥ 5.x deprecated `dynamodb_table` for S3 native locking.
+**Fix:** Replace in all `backend.tf` files:
+```hcl
+# Old (deprecated)
+dynamodb_table = "retail-store-tf-lock"
+
+# New
+use_lockfile = true
+```
+
+### Services get 500 errors despite containers RUNNING — inter-service communication fails
+
+**Root cause (two issues):**
+
+1. **No Cloud Map registration** — the `ecs-service` module didn't create `aws_service_discovery_service`, so DNS names like `catalog.dev.local` didn't resolve.
+
+2. **Missing port in service URLs** — Cloud Map A records give the task's private IP only.
+   `http://catalog.dev.local` hits port 80, but containers listen on 8080.
+
+**Fix:**
+- Add `aws_service_discovery_service` resource to the `ecs-service` module
+- Add `service_registries` to the `aws_ecs_service` resource
+- Pass `cloud_map_namespace_id` from the logging module output
+- Add `:8080` to all inter-service URLs:
+  ```hcl
+  RETAIL_UI_ENDPOINTS_CATALOG = "http://catalog.dev.local:8080"
+  ```
+- Add VPC CIDR ingress rule to the service security group (inter-service calls don't go
+  through the ALB, so the ALB-only rule blocks them)
+
+### `EntityAlreadyExists: Provider with url https://token.actions.githubusercontent.com already exists`
+
+**Cause:** GitHub OIDC provider already exists in the AWS account (created by another project).
+**Fix — Option A (import):**
+```bash
+terraform import aws_iam_openid_connect_provider.github \
+  arn:aws:iam::{account_id}:oidc-provider/token.actions.githubusercontent.com
+```
+**Fix — Option B (delete and recreate):**
+```bash
+aws iam delete-open-id-connect-provider \
+  --open-id-connect-provider-arn arn:aws:iam::{account_id}:oidc-provider/token.actions.githubusercontent.com
+terraform apply
+```
 
 ---
 

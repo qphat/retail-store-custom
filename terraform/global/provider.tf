@@ -6,10 +6,10 @@ terraform {
 
   # Store global state separately from environment state
   backend "s3" {
-    bucket         = "retail-store-tf-state"   # patched by scripts/setup-backend.sh
+    bucket         = "retail-store-tf-state-630022771147"
     key            = "retail-store/global/terraform.tfstate"
     region         = "us-east-1"
-    dynamodb_table = "retail-store-tf-lock"
+    use_lockfile   = true
     encrypt        = true
   }
 }

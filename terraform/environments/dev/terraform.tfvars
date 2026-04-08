@@ -22,4 +22,4 @@ es_java_opts = "-Xms512m -Xmx512m"
 
 # Kibana
 kibana_cpu    = 512
-kibana_memory = 1536
+kibana_memory = 1024

@@ -91,22 +91,18 @@ resource "aws_ecs_task_definition" "this" {
 
   container_definitions = jsonencode([
     # ── Container 1: FireLens log router (Fluent Bit sidecar) ──
+    # Uses AWS-managed FireLens config (no custom config file needed).
+    # App container specifies the output plugin + ES connection in its log options.
     {
       name      = "log_router"
       image     = var.fluent_bit_image
       essential = false   # if Fluent Bit crashes, app container keeps running
 
-      # firelensConfiguration turns this container into the FireLens log router.
-      # AWS injects it as a log broker — app container's awsfirelens log driver
-      # sends logs here via a Unix socket in the shared task network namespace.
+      # AWS-managed FireLens: no custom config-file, AWS injects the base config.
+      # Output plugin config comes from the app container's logConfiguration.options.
       firelensConfiguration = {
-        type = "fluentbit"
-        options = {
-          # We provide a custom config rather than the AWS-managed default,
-          # so we can control the Elasticsearch output settings.
-          "config-file-type"  = "file"
-          "config-file-value" = "/fluent-bit/etc/fluent-bit.conf"
-        }
+        type    = "fluentbit"
+        options = {}
       }
 
       # Fluent Bit's own operational logs go to CloudWatch directly (not via FireLens —
@@ -119,21 +115,6 @@ resource "aws_ecs_task_definition" "this" {
           "awslogs-stream-prefix" = "firelens"
         }
       }
-
-      environment = [
-        { name = "ES_HOST",      value = local.es_host },
-        { name = "ENV_NAME",     value = var.env_name },
-        { name = "SERVICE_NAME", value = var.service_name },
-        { name = "FLB_LOG_LEVEL", value = "warn" }
-      ]
-
-      # Fluent Bit config is mounted from SSM via a secret (populated by logging module)
-      secrets = [
-        {
-          name      = "FLUENT_BIT_CONFIG"
-          valueFrom = "/${var.env_name}/fluent-bit/config"
-        }
-      ]
 
       mountPoints  = []
       volumesFrom  = []
@@ -154,15 +135,20 @@ resource "aws_ecs_task_definition" "this" {
         for k, v in var.environment_vars : { name = k, value = v }
       ]
 
-      # KEY DIFFERENCE FROM K8s: instead of awslogs, use awsfirelens.
-      # ECS intercepts this container's stdout and sends it to the log_router container.
-      # The log_router (Fluent Bit) then routes it to Elasticsearch.
+      # awsfirelens routes stdout → log_router (Fluent Bit) → Elasticsearch.
+      # Name = output plugin; Host/Port/Index = ES connection details.
+      # ECS generates a valid Fluent Bit [OUTPUT] section from these options.
       logConfiguration = {
         logDriver = "awsfirelens"
         options = {
-          # These become Fluent Bit record fields, available in filter rules
-          "service" = var.service_name
-          "env"     = var.env_name
+          "Name"        = "es"
+          "Host"        = local.es_host
+          "Port"        = "9200"
+          "Index"       = "logs-${var.service_name}"
+          "Type"        = "_doc"
+          "Retry_Limit" = "2"
+          "tls"         = "Off"
+          "tls.verify"  = "Off"
         }
       }
 
@@ -175,8 +161,6 @@ resource "aws_ecs_task_definition" "this" {
       }
 
       # Wait for Fluent Bit to be running before starting the app.
-      # START = container process started (not necessarily healthy).
-      # We use START not HEALTHY to avoid needing a healthcheck on the sidecar.
       dependsOn = [
         { containerName = "log_router", condition = "START" }
       ]
@@ -184,6 +168,27 @@ resource "aws_ecs_task_definition" "this" {
   ])
 
   tags = var.tags
+}
+
+# ── Cloud Map Service Discovery ───────────────────────────────────────────────
+# Registers an A record in {env}.local so other services can resolve
+# {service}.{env}.local → task private IP (e.g. catalog.dev.local → 10.0.x.x)
+resource "aws_service_discovery_service" "this" {
+  name = var.service_name
+
+  dns_config {
+    namespace_id   = var.cloud_map_namespace_id
+    routing_policy = "MULTIVALUE"
+
+    dns_records {
+      ttl  = 10
+      type = "A"
+    }
+  }
+
+  health_check_custom_config {
+    failure_threshold = 1
+  }
 }
 
 # ── Security Group ────────────────────────────────────────────────────────────
@@ -199,6 +204,14 @@ resource "aws_security_group" "service" {
     to_port         = var.container_port
     protocol        = "tcp"
     security_groups = [var.alb_sg_id]
+  }
+
+  ingress {
+    description = "Inter-service calls within VPC (Cloud Map service discovery)"
+    from_port   = var.container_port
+    to_port     = var.container_port
+    protocol    = "tcp"
+    cidr_blocks = [var.vpc_cidr]
   }
 
   egress {
@@ -274,6 +287,11 @@ resource "aws_ecs_service" "this" {
   # Deployment settings — how ECS rolls out new task definition versions
   deployment_minimum_healthy_percent = 50    # in dev: allow 0 running during deploy
   deployment_maximum_percent         = 200   # spin up new tasks before killing old
+
+  # Register with Cloud Map so other services resolve {service}.{env}.local
+  service_registries {
+    registry_arn = aws_service_discovery_service.this.arn
+  }
 
   # Ensure the ALB listener rule exists before creating the service
   # (service registration fails if target group isn't attached to a listener)
