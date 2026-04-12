@@ -145,7 +145,6 @@ resource "aws_ecs_task_definition" "this" {
           "Host"        = local.es_host
           "Port"        = "9200"
           "Index"       = "logs-${var.service_name}"
-          "Type"        = "_doc"
           "Retry_Limit" = "2"
           "tls"         = "Off"
           "tls.verify"  = "Off"
