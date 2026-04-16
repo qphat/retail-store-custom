@@ -42,3 +42,14 @@ variable "node_max" {
   type    = number
   default = 3
 }
+
+variable "jenkins_instance_type" {
+  description = "EC2 instance type for Jenkins controller"
+  type        = string
+  default     = "t3.medium"
+}
+
+variable "jenkins_allowed_cidr" {
+  description = "Your IP in CIDR notation for Jenkins UI + SSH (e.g. 1.2.3.4/32)"
+  type        = string
+}
