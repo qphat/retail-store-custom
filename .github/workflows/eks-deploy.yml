@@ -1,0 +1,259 @@
+name: EKS Deploy
+
+on:
+  push:
+    branches: [feat/eks, main]
+    paths:
+      - 'src/**'
+      - 'helm/**'
+      - '.github/workflows/eks-deploy.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write   # OIDC for AWS credentials
+
+concurrency:
+  group: eks-deploy
+  cancel-in-progress: false   # queue deploys — never cancel mid-deploy
+
+jobs:
+  # ──────────────────────────────────────────────────────────────────────────
+  # Job 1: Detect which services changed
+  # ──────────────────────────────────────────────────────────────────────────
+  detect-changes:
+    name: Detect changed services
+    runs-on: ubuntu-latest
+    outputs:
+      services: ${{ steps.filter.outputs.changes }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            catalog:
+              - 'src/catalog/**'
+            cart:
+              - 'src/cart/**'
+            orders:
+              - 'src/orders/**'
+            checkout:
+              - 'src/checkout/**'
+            ui:
+              - 'src/ui/**'
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Job 2: Build + scan + push images (same logic as cicd.yml)
+  # ──────────────────────────────────────────────────────────────────────────
+  build:
+    name: Build — ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.services != '[]' && needs.detect-changes.outputs.services != ''
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJson(needs.detect-changes.outputs.services) }}
+        include:
+          - service: catalog
+            runtime: go
+            cache-dep-path: src/catalog/go.sum
+          - service: cart
+            runtime: java
+            java-version: '21'
+            cache-dep-path: src/cart/pom.xml
+          - service: orders
+            runtime: java
+            java-version: '21'
+            cache-dep-path: src/orders/pom.xml
+          - service: checkout
+            runtime: node
+            node-version: '22'
+          - service: ui
+            runtime: java
+            java-version: '21'
+            cache-dep-path: src/ui/pom.xml
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        if: matrix.runtime == 'go'
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: src/${{ matrix.service }}/go.mod
+          cache-dependency-path: ${{ matrix.cache-dep-path }}
+
+      - name: Set up Java
+        if: matrix.runtime == 'java'
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ matrix.java-version }}
+          distribution: temurin
+          cache: maven
+          cache-dependency-path: ${{ matrix.cache-dep-path }}
+
+      - name: Set up Node
+        if: matrix.runtime == 'node'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ vars.DOCKER_REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: src/${{ matrix.service }}
+          push: false
+          load: true
+          tags: |
+            ${{ vars.IMAGE_PREFIX }}-${{ matrix.service }}:${{ github.sha }}
+            ${{ vars.IMAGE_PREFIX }}-${{ matrix.service }}:latest
+
+      - name: Scan with Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ vars.IMAGE_PREFIX }}-${{ matrix.service }}:${{ github.sha }}
+          format: table
+          exit-code: 1
+          severity: CRITICAL
+          ignore-unfixed: true
+
+      - name: Push image
+        uses: docker/build-push-action@v6
+        with:
+          context: src/${{ matrix.service }}
+          push: true
+          tags: |
+            ${{ vars.IMAGE_PREFIX }}-${{ matrix.service }}:${{ github.sha }}
+            ${{ vars.IMAGE_PREFIX }}-${{ matrix.service }}:latest
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Job 3: Deploy to EKS via Helm
+  #
+  # helm upgrade --install is idempotent — safe to run on every push.
+  # imageTag is pinned to the exact git SHA for reproducibility.
+  # NGINX ingress controller is deployed first (idempotent --install).
+  # ──────────────────────────────────────────────────────────────────────────
+  eks-deploy:
+    name: Deploy to EKS
+    runs-on: ubuntu-latest
+    needs: [build, detect-changes]
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Set up kubectl + helm
+        uses: azure/setup-kubectl@v4
+
+      - name: Update kubeconfig for EKS
+        run: |
+          aws eks update-kubeconfig \
+            --name eks-dev-retail-store \
+            --region ${{ vars.AWS_REGION }}
+          kubectl get nodes
+
+      - name: Deploy NGINX ingress controller
+        run: |
+          helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+          helm repo update
+          helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
+            --namespace ingress-nginx \
+            --create-namespace \
+            --set controller.service.type=LoadBalancer \
+            --wait \
+            --timeout 5m
+
+      - name: Deploy retail-store with Helm
+        run: |
+          helm upgrade --install retail-store helm/retail-store \
+            --set imageTag=${{ github.sha }} \
+            --set imageRegistry=${{ vars.IMAGE_PREFIX_REGISTRY || 'koomi1' }} \
+            --wait \
+            --timeout 10m
+
+      - name: Show deployment status
+        run: |
+          echo "=== Pods ==="
+          kubectl get pods -o wide
+          echo ""
+          echo "=== Ingress ==="
+          kubectl get ingress
+          echo ""
+          echo "=== Services ==="
+          kubectl get svc
+
+      - name: Wait for ingress address
+        id: ingress
+        run: |
+          echo "Waiting for ingress to get an address..."
+          for i in $(seq 1 20); do
+            ADDR=$(kubectl get ingress retail-store \
+              -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+            if [ -n "$ADDR" ]; then
+              echo "Ingress address: $ADDR"
+              echo "address=$ADDR" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            echo "  attempt $i: no address yet — waiting 15s..."
+            sleep 15
+          done
+          echo "Ingress address not ready after 5 minutes"
+          exit 1
+
+      - name: Smoke test — all services
+        run: |
+          BASE="http://${{ steps.ingress.outputs.address }}"
+          FAILED=0
+
+          check() {
+            local name=$1
+            local url=$2
+            local expected=$3
+
+            for i in $(seq 1 10); do
+              STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$url" || echo "000")
+              if [ "$STATUS" = "$expected" ]; then
+                echo "✓ $name → $STATUS"
+                return 0
+              fi
+              echo "  $name attempt $i: got $STATUS, expected $expected — retrying in 15s..."
+              sleep 15
+            done
+
+            echo "✗ $name FAILED after 10 attempts"
+            FAILED=$((FAILED + 1))
+          }
+
+          check "ui"       "$BASE/"                     "200"
+          check "catalog"  "$BASE/catalogue"            "200"
+          check "cart"     "$BASE/api/cart/health"      "200"
+          check "orders"   "$BASE/api/orders/health"    "200"
+          check "checkout" "$BASE/api/checkout/health"  "200"
+          check "kibana"   "$BASE/kibana/api/status"    "200"
+
+          if [ $FAILED -gt 0 ]; then
+            echo ""
+            echo "✗ $FAILED service(s) failed smoke test"
+            exit 1
+          fi
+
+          echo ""
+          echo "✓ All services healthy on EKS"
+          echo "App URL: $BASE"

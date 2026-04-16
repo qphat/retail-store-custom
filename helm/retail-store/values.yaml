@@ -31,6 +31,11 @@ services:
       limits:
         cpu: 500m
         memory: 512Mi
+    # IRSA: annotate the ServiceAccount so the cart pod can assume the IAM role
+    # Set this to the cart_irsa_role_arn output from terraform/environments/eks-dev
+    # Example: helm upgrade --set services.cart.serviceAccount.annotations."eks\.amazonaws\.com/role-arn"=<ARN>
+    serviceAccount:
+      annotations: {}
 
   orders:
     image: retail-app-orders
